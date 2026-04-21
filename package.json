@@ -1,0 +1,17 @@
+{
+  "name": "ai-sandbox",
+  "version": "1.0.0",
+  "description": "Учебная песочница по Claude API — AI-Expert-Journey",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "smuuuzik-tech",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
+    "dotenv": "^17.4.2"
+  },
+  "type": "module"
+}
