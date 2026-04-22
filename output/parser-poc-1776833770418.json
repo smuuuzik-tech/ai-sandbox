@@ -1,0 +1,31 @@
+{
+  "url": "https://ru.wikipedia.org/wiki/Machine_learning",
+  "model": "claude-sonnet-4-5",
+  "timestamp": "2026-04-22T04:56:10.418Z",
+  "extracted": {
+    "title": "Машинное обучение",
+    "brand": null,
+    "price_rub": null,
+    "price_original_rub": null,
+    "discount_percent": null,
+    "currency": "RUB",
+    "rating": null,
+    "reviews_count": null,
+    "in_stock": false,
+    "seller": null,
+    "category": null,
+    "main_image_url": null,
+    "key_attributes": [],
+    "confidence": 0.1
+  },
+  "metrics": {
+    "jina_ms": 4489,
+    "jina_chars": 42117,
+    "claude_latency_ms": 6224,
+    "input_tokens": 18450,
+    "output_tokens": 284,
+    "cost_usd": 0.05961,
+    "zod_valid": true,
+    "zod_issues": []
+  }
+}

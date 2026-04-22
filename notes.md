@@ -409,3 +409,90 @@ Zod добавляет это через `.refine((data) => condition, {message,
 - Fallback-цепочка Sonnet → Haiku при 529: как архитектурно оформить — middleware или в retry-обёртке?
 - Langfuse self-hosted vs cloud: когда пора переходить с простого JSONL? Порог наверное 100+ req/day.
 - Стрим tool_use (input_json_delta) — когда парсить частичный JSON? На Day 10 в агенте понадобится.
+
+---
+
+## Day 6 — 22.04.2026. Idea Pressure Tester + POC AI-парсера
+
+### Концепт дня
+
+Первый работающий **агентный цикл**: Claude в роли seed-инвестора прогоняет идею фаундера через интервью в стиле Mom Test, задаёт до 5 уточняющих вопросов, в конце вызывает terminator tool `deliver_verdict` с структурированным вердиктом (go/pivot/kill + 6 скоров + 3 риска + 3 валидации + kill criteria). Плюс параллельно — технический POC парсинга одной страницы через Jina Reader → Claude forced extract, чтобы получить реальную цифру стоимости.
+
+### Главная развилка: «можно ли это сделать в чате Claude?»
+
+Начинал с Post Generator для TG/IG. В середине дня спросил себя этот вопрос — ответ «да, легко». Остановился. Вывел правило: **AI-API-скрипт оправдан только если присутствует хотя бы один из пяти признаков**:
+1. **Триггер** — автоматический запуск по событию (cron, webhook, новый файл)
+2. **Батч** — много объектов в цикле
+3. **Интеграция** — подтягивает данные из другого сервиса
+4. **Agent loop** — многошаговое рассуждение с tools
+5. **Приватность** — данные нельзя отправить в веб-чат
+
+Post Generator не проходил ни один критерий. Idea Pressure Tester проходит agent loop. Переориентировался.
+
+### Архитектура agent loop — три файла + while-цикл
+
+- `prompts/investor-skeptic.js` — system prompt (3KB) как отдельный артефакт. Роль, методология (Mom Test / YC triad / 4D fit), правила вопросов, тон. Паттерн «промпты как артефакты» — это reusable система, промпт живёт своей жизнью отдельно от логики.
+- `schemas/verdict.js` — Zod-схема для локальной валидации + JSON Schema для `VERDICT_TOOL.input_schema` (что Claude реально читает). Пишу JSON Schema руками, не генерю из Zod — description'ы слишком важны, чтобы их доверять автогенератору.
+- `idea-tester.js` — CLI + agent loop.
+
+Цикл:
+```js
+while (true) {
+  const response = await client.messages.create({...tools, messages});
+  messages.push({ role: 'assistant', content: response.content }); // ЦЕЛИКОМ
+  if (response.stop_reason === 'end_turn') break;
+  const toolResults = response.content
+    .filter(c => c.type === 'tool_use')
+    .map(tu => handleTool(tu));
+  messages.push({ role: 'user', content: toolResults });
+  if (deliver_verdict_called) break;
+  if (++iterations > MAX_ITER) break; // safety
+}
+```
+
+### Два ключевых safety-паттерна
+
+**1. Zod self-heal.** Первая ошибка валидации → кидаем Claude обратно `tool_result` с `is_error: true` и списком `path + message`. Модель получает шанс переделать. **Только одна попытка** — без ограничения легко уйти в бесконечную петлю «Claude исправляет одно, ломает другое». На двух прогонах обе ошибки Zod были исправлены с первой попытки.
+
+**2. Budget-aware agent.** `MAX_CLARIFICATIONS = 5`. Когда бюджет кончается — инжектим в следующий user-turn системную заметку «бюджет вопросов исчерпан, вызывай `deliver_verdict` сейчас». Паттерн: управление агентом через инжекты в conversation, не через жёсткие rule-based остановки. Agent продолжает думать самостоятельно, просто с обновлённым контекстом.
+
+### Tool description — это продажа tool'а модели
+
+На `deliver_verdict` description начал с правила: «Call this ONLY when you have enough information to give a SPECIFIC, non-generic verdict. If the answers are still vague — ask one more clarification instead.» Это работает: Claude на первых 2-3 вопросах выбирал `ask_clarification`, не пытался схлопнуться в вердикт раньше времени. **Description — это не документация, это инструкция, которую модель читает в том же поле что и системный промпт.** Пиши её как ТЗ джуну.
+
+### Извлечённый инсайт про собственную нишу
+
+Claude в роли инвестора спросил: «назови 3-5 реальных клиентов Proxy.Market с именами и конкретными часами/бюджетом на поддержку парсеров». Я работаю в этой нише, но не смог назвать ни одного с точными цифрами. Слышал общие жалобы — да. Имею конкретный unit-экономик разговор с конкретным CTO — нет. **Агент обнаружил разрыв, который я сам не видел.** Это не теоретическое упражнение, это объективно измеримый знание-gap.
+
+### POC AI-парсера — три прогона, две находки
+
+Архитектура POC: `fetch('https://r.jina.ai/' + url)` → обрезаем до 30k символов → Claude с `tool_choice: {type:'tool', name:'extract_product'}` + `temperature: 0` → Zod productSchema + self-reported `confidence` (0-1).
+
+**Прогон 1. Wildberries (кроссовки).** Jina вернула 404 символа — loading-skeleton «Почти готово...». Claude поставил confidence 10%, не галлюцинировал. **Голый Jina не пробивает WB.**
+
+**Прогон 2. Ozon (футболка).** Jina 737 символов, Claude извлёк только title + confidence 20%. Тот же паттерн — SPA не отрендерился.
+
+**Прогон 3. Wikipedia (Машинное обучение) — контрольный.** Jina 42 117 символов (SSR), Claude extract прошёл. **Input tokens: 18 450, стоимость одного запроса: $0.060.**
+
+### Unit economics — главная цифра дня
+
+**$0.06/страница × 100 000 страниц = $5 961 ТОЛЬКО на Claude Sonnet.** Без Jina Premium, без proxy, без Playwright. Сравнение: Firecrawl $0.016/стр, мы в 4 раза дороже на голом pipeline.
+
+Путь к сходимости юнит-экономики:
+- **Haiku вместо Sonnet** — input $1/M vs $3/M → ~$0.02/стр. Но качество на сложных страницах надо мерить.
+- **Пре-обработка markdown** — из 30k символов Jina ~50% это навигация, футер, «похожие товары». Вырезать шум → 5-6k токенов вместо 18k → 3× экономии.
+- **Оба вместе** → $0.003-0.005/стр, что уже конкурентно.
+
+### Главный архитектурный вывод по идее AI-парсера
+
+**LLM extract — это 10% стоимости продукта. 90% — rendering + proxy + anti-detect.** Голый Jina не берёт WB/Ozon — это ядро. Значит продукт не столько «AI-парсер», сколько **«AI-wrapper над rendering+proxy инфраструктурой»**. Это меняет pitch: Proxy.Market — не вспомогательный козырь, а потенциально **operational backbone** продукта. Founder-market fit из score 8/10 превращается в «я сижу на инфраструктуре, которую конкуренты будут покупать годами». Это нужно перепроверить в week-3 interviews.
+
+### Self-reported confidence — паттерн, который работает
+
+Добавил в productSchema поле `confidence: 0-1` с description «1.0 = every field directly present in markdown. 0.5 = some fields inferred from context. 0.2 = many fields null or content looks like noise». На всех трёх прогонах Claude честно ставил низкие значения когда контента не было, высокие — когда был. **Это паттерн Cursor/Perplexity для self-critique. В проде — гейт: `if (confidence < 0.5) → manual review | second pass на Opus`.** Работает только при явной инструкции «не выдумывай» в tool description, иначе модель всё равно рандомно выдаст 0.8-0.9.
+
+### Вопросы на потом
+- Prompt caching для `investor-skeptic.js` system prompt (~3KB, стабилен между прогонами): насколько сократит cost второй и последующих прогонов?
+- Pre-processing markdown перед extract — lib типа `@mozilla/readability`? Или своя эвристика «оставь только `<main>`-блок»?
+- Как тестировать агент-скептик evals-ом: синтетические идеи, где заранее известен правильный вердикт? (Day 47)
+- Structured streaming tool_use через `input_json_delta` — когда парсить частичный JSON верификации? Для UX агента с долгим reasoning может быть важно.

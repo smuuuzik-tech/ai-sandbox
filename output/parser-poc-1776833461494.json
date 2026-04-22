@@ -1,0 +1,31 @@
+{
+  "url": "https://www.wildberries.ru/catalog/386552533/detail.aspx",
+  "model": "claude-sonnet-4-5",
+  "timestamp": "2026-04-22T04:51:01.494Z",
+  "extracted": {
+    "title": "Почти готово...",
+    "brand": null,
+    "price_rub": null,
+    "price_original_rub": null,
+    "discount_percent": null,
+    "currency": "RUB",
+    "rating": null,
+    "reviews_count": null,
+    "in_stock": false,
+    "seller": null,
+    "category": null,
+    "main_image_url": null,
+    "key_attributes": [],
+    "confidence": 0.1
+  },
+  "metrics": {
+    "jina_ms": 16518,
+    "jina_chars": 404,
+    "claude_latency_ms": 4784,
+    "input_tokens": 1265,
+    "output_tokens": 282,
+    "cost_usd": 0.008025,
+    "zod_valid": true,
+    "zod_issues": []
+  }
+}

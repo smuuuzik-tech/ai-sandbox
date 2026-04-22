@@ -1,0 +1,31 @@
+{
+  "url": "https://www.ozon.ru/product/futbolka-futbolka-zhenskaya-s-printom-3199139296/",
+  "model": "claude-sonnet-4-5",
+  "timestamp": "2026-04-22T04:53:50.062Z",
+  "extracted": {
+    "title": "Футболка футболка женская с принтом",
+    "brand": null,
+    "price_rub": null,
+    "price_original_rub": null,
+    "discount_percent": null,
+    "currency": "RUB",
+    "rating": null,
+    "reviews_count": null,
+    "in_stock": false,
+    "seller": null,
+    "category": null,
+    "main_image_url": null,
+    "key_attributes": [],
+    "confidence": 0.2
+  },
+  "metrics": {
+    "jina_ms": 4886,
+    "jina_chars": 737,
+    "claude_latency_ms": 6314,
+    "input_tokens": 1446,
+    "output_tokens": 290,
+    "cost_usd": 0.008688,
+    "zod_valid": true,
+    "zod_issues": []
+  }
+}
