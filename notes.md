@@ -326,3 +326,86 @@ Zod добавляет это через `.refine((data) => condition, {message,
 - Двухступенчатая архитектура «classify → route»: на Day 10 agent loop реализую?
 - Насколько JSON-схема переносима в другие LLM (OpenAI function calling, Gemini)? Проверить.
 
+## Day 5 — 22.04.2026
+
+### Streaming (SSE — Server-Sent Events)
+
+**Суть.** Обычный `messages.create()` блокирует код пока Claude не сгенерит весь ответ (5-10 секунд тишины для юзера). `messages.stream()` открывает HTTP-соединение и **не закрывает** — сервер пушит ответ кусочками по мере генерации. Реальная скорость не меняется, но **воспринимаемая скорость × 5** потому что первое слово появляется через ~1.5 сек вместо ~8 сек.
+
+**Под капотом.** Поток SSE-событий: `message_start` → `content_block_start` → серия `content_block_delta` (text_delta кусочками или input_json_delta для tool use) → `content_block_stop` → `message_delta` (финальные output_tokens) → `message_stop`. SDK обёртывает это в 3 интерфейса:
+- `stream.on('text', cb)` — самый высокий уровень, колбэк на готовые куски текста
+- `for await (chunk of stream)` — async iterator, сырые события (нужно для tool use)
+- `await stream.finalMessage()` — ждёт конца и возвращает собранное сообщение как обычный response
+
+Эти три **не взаимоисключающие**. Стандартный prod-паттерн: `.on('text')` для печати в UI + `finalMessage()` для логирования.
+
+**Где это в реальных продуктах.** Claude.ai/ChatGPT — стримят текст. Cursor — стримит inline-дополнения и diff через tool_use (`input_json_delta` парсится инкрементально). Perplexity — двухфазный стрим: сначала источники, потом ответ. v0.dev — стримит tool_use с контентом файла, справа HMR обновляет превью. Replit Agent — стримит лог действий.
+
+### Где измерять в стриме — TTFT vs total latency
+
+- **TTFT (time to first token)** — засекаем в момент прихода **первого** `text_delta`. Это UX-метрика: «через сколько юзер увидел реакцию».
+- **Total latency** — от старта запроса до `finalMessage()`. Это инфраструктурная метрика.
+- **Output_tokens можно узнать ТОЛЬКО после закрытия стрима** — приходит в `message_delta` последним. Стоимость считаем только после финала, не в процессе.
+
+На моих замерах: TTFT 815-1840ms, total 7-15 сек в зависимости от длины ответа. **Стрим съедает ~90% воспринимаемого ожидания.**
+
+### Error handling — категории ошибок и retry
+
+**Три категории (по HTTP-коду):**
+- **Транзиентные** (ретраим): 408, 429 rate limit, 500/502/503, 504, 529 overloaded + сетевые таймауты (APIConnectionError). Это «подожди и попробуй снова».
+- **Фатальные** (НЕ ретраим): 401 auth, 403 forbidden, 400 bad request, 404. Ошибка в коде/конфиге, ретрай не поможет.
+- **Серая зона**: обрыв стрима посреди — обычно ретраим с осторожностью.
+
+**Exponential backoff with jitter.** Формула: `baseDelay × 2^(attempt-1) × (1 ± 0.3)`. У меня получилось: попытка 2 = 1183ms, попытка 3 = 1813ms (база 1000ms). Jitter критичен — без него при массовом сбое 1000 клиентов ретраят синхронно и добивают сервер. С jitter — ретраи размазаны во времени.
+
+**SDK умеет сам.** Anthropic SDK ретраит 429/500/529 автоматически с backoff + уважает Retry-After header. Параметры: `maxRetries` (default 2), `timeout` (default 60_000ms). Для 90% кода этого достаточно. Своя обёртка нужна когда хочешь видеть ретраи в логах, делать fallback (Sonnet → Haiku при 529), или circuit breaker.
+
+**Продакшн-правило.** Никогда не показывать юзеру 500 ошибку. Всегда retry + fallback-ответ. Как это делают: Cursor показывает «reconnecting...», Perplexity тихо переключается на fallback-модель, Intercom Fin возвращает «передаю оператору» при полном фейле.
+
+### Observability — JSONL-логгер
+
+**Формат — JSONL (JSON Lines).** Одна запись = одна строка валидного JSON + `\n`. Почему этот формат:
+- Аппендится без перечитывания файла (важно для 1000+ записей/день)
+- Каждая строка парсится независимо — одна битая не ломает всё
+- Читается `jq`, `grep`, импортируется в BigQuery/ClickHouse напрямую
+- Это де-факто стандарт для LLM-логов (Langfuse/Helicone тоже так)
+
+**Что логировать на каждый вызов.** timestamp, model (точная версия), input_tokens, output_tokens, latency_ms, ttft_ms (для стрима), cost_usd, stop_reason, request_id (для запроса в Anthropic support), success, error (если упало), tag (что за сценарий), user_id (в проде).
+
+**stop_reason: 'max_tokens' — это алерт.** На стриме я поставил max_tokens=300, Claude уткнулся и ответ обрезался. В проде процент таких запросов — первая метрика на дешборде. Означает «юзер получил неполный ответ».
+
+**Request_id всегда сохраняем.** По нему Anthropic support может в своих логах посмотреть что именно произошло. Это единственный способ разобраться в странных сбоях.
+
+**Продукты для observability (на будущее).** Langfuse (self-hosted Sentry для LLM с трейсингом chain), Helicone (прокси перед Anthropic, ловит всё), Braintrust (evals + логи). OpenTelemetry стандарт для LLM теперь есть — можно логировать в любой APM. На моём этапе (1 dev, 0 юзеров) — свой JSONL достаточно. Перейду на Langfuse когда будет 50+ юзеров.
+
+### Финальная интеграция всех 5 дней
+
+Собрал **Meeting Notes Processor** — парсер заметок после встречи (аналог Granola/Fathom/Notion AI). В `integration.js`:
+- Day 1: setup + SDK
+- Day 2: system prompt + temperature=0 для детерминизма + multi-turn с полной историей
+- Day 3: tool `get_current_date` в agent loop (Claude вызывает → код выполняет → продолжает)
+- Day 4: финальный structured output через `tool_choice: {type:'tool', name:'submit_action_items'}` + Zod с двумя бизнес-правилами (has_unclear_items связан с unclear_items, critical обязан иметь due_date)
+- Day 5: streaming на первом шаге, withRetry на всех, logCall после каждого
+
+**Результат.** На реальных заметках с относительными датами Claude корректно посчитал 4 из 4: «к пятнице» → 24.04, «через 2 недели» → 06.05, «за неделю» → 29.04, «15 мая» → 15.05. Оценил время (30 интервью × 60 мин = 1800 мин) без инструкции. Сам пометил пункт про observability как unclear через `has_unclear_items: true`.
+
+**Главный вывод.** Cursor, Notion AI, Granola, v0.dev — это **не «ChatGPT с UI»**. Это streaming + tool use в loop + forced structured output + Zod validation + retry + logger. Секретного ингредиента нет. Это обычная инженерия поверх LLM. И я её собрал за 5 дней.
+
+### Инсайт: промпт не гарантирует поведение
+
+В Шаге 1 интеграции я просил Claude «think through out loud in Russian» перед tool use. Ожидал стрим текста-рассуждения, потом tool_use block. Получил: пустой текстовый блок, сразу tool_use. Модель сочла что думать нечего — в заметках есть относительные даты, нужна сегодняшняя, зовём tool.
+
+**Вывод.** Промпт задаёт предпочтения, не гарантии. Если нужно жёстко форсировать reasoning prelude — либо явная инструкция («always write at least 2 sentences of reasoning BEFORE any tool_use»), либо prefill (начать assistant turn с «Вижу несколько относительных дат:»), либо два отдельных вызова (сначала reasoning, потом action). Это типовая проблема агентов — в Day 10 разберём глубже.
+
+### Эксперимент который запустил своими руками
+
+5 прогонов одного и того же промпта «Объясни SSE в 3 абзацах» через streaming.js:
+- TTFT варьируется 800-1900ms (сервер нагружен по-разному)
+- Output_tokens варьируется 300-400 (LLM-рулетка на одинаковом промпте, подтверждает Day 4)
+- Стоимость: ~$0.004-0.006 за запрос
+
+### Вопросы на потом
+- Prompt caching (Day 8): насколько реально сократит cost для постоянного system prompt в integration.js (system + схема tool = ~800 токенов стабильно)?
+- Fallback-цепочка Sonnet → Haiku при 529: как архитектурно оформить — middleware или в retry-обёртке?
+- Langfuse self-hosted vs cloud: когда пора переходить с простого JSONL? Порог наверное 100+ req/day.
+- Стрим tool_use (input_json_delta) — когда парсить частичный JSON? На Day 10 в агенте понадобится.
